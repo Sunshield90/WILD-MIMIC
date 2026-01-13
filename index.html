@@ -1,0 +1,337 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Wild Mimic - Cyber Interface</title>
+    
+    <link rel="stylesheet" href="style.css">
+
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/holistic/holistic.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils/drawing_utils.js" crossorigin="anonymous"></script>
+
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=VT323&display=swap" rel="stylesheet">
+</head>
+<body>
+
+    <div class="cyber-bg"></div>
+    <div class="scanlines"></div>
+
+    <div id="loading">
+        <div class="loader"></div>
+        <h2>INITIALIZING NEURAL LINK...</h2>
+    </div>
+
+    <header>
+        <h1>WILD MIMIC</h1>
+        <div class="subtitle">AI POSE RECOGNITION // SYSTEM V.3.0</div>
+    </header>
+
+    <div class="main-interface">
+        
+        <div class="panel input">
+            <div class="panel-header">LIVE FEED</div>
+            <div class="corner-decor tl"></div>
+            <div class="corner-decor br"></div>
+            
+            <video id="input_video" autoplay playsinline muted></video>
+            <canvas id="output_canvas"></canvas>
+            
+            <div id="debug-text" class="debug-overlay">Waiting for input...</div>
+            
+            <div class="status-container">
+                <div id="status-text" class="status-badge">SCANNING...</div>
+            </div>
+        </div>
+
+        <div class="panel output">
+            <div class="panel-header">DATABASE MATCH</div>
+            <div class="corner-decor tl"></div>
+            <div class="corner-decor br"></div>
+            
+            <img id="animal-display" src="" alt="Animal Match">
+            
+            <div class="status-container">
+                <div id="animal-label" class="status-badge">NO TARGET</div>
+            </div>
+        </div>
+    </div>
+
+<script>
+    const POSE_IMAGES = {
+        'peace_one':   ['2'],    
+        'peace_two':   ['3'],    
+        'hands_up':    ['6'],    
+        'smile':       ['9'],    
+        'tongue':      ['10'],   
+        'mouth_open':  ['11'],   
+        'scared':      ['12'],   
+        'ears':        ['13'],   
+        'stop':        ['14'],   
+        'cute':        ['17']    
+    };
+
+    const LABELS = {
+        'peace_one': 'Peace',
+        'peace_two': 'Double Peace',
+        'hands_up': 'Play Time',
+        'smile': 'Smiling',
+        'tongue': 'Funny',
+        'mouth_open': 'Yawn',
+        'scared': 'Scared',
+        'ears': 'Sorry',
+        'stop': 'Stop',
+        'cute': 'Cutie'
+    };
+
+    const videoElement = document.getElementById('input_video');
+    const canvasElement = document.getElementById('output_canvas');
+    const canvasCtx = canvasElement.getContext('2d');
+    const animalDisplay = document.getElementById('animal-display');
+    const statusText = document.getElementById('status-text');
+    const animalLabel = document.getElementById('animal-label');
+    const loadingScreen = document.getElementById('loading');
+    const debugText = document.getElementById('debug-text');
+
+    let displayedPose = 'neutral';
+    let lastDetectedPose = 'neutral';
+    let poseFrameCounter = 0;
+    const POSE_THRESHOLD = 3; 
+
+    setAnimalImage('neutral');
+
+    function setAnimalImage(poseName) {
+        if (poseName === 'neutral') {
+            animalLabel.innerText = "Do a pose!";
+            return;
+        }
+
+        if (!POSE_IMAGES[poseName]) return;
+        
+        const baseNames = POSE_IMAGES[poseName];
+        const randomName = baseNames[Math.floor(Math.random() * baseNames.length)];
+        
+        const imgPath = randomName + ".png"; 
+        animalDisplay.src = imgPath;
+        
+        animalDisplay.onerror = function() {
+            this.onerror = null;
+            this.src = randomName + ".jpg";
+        }
+        
+        animalLabel.innerText = LABELS[poseName] || poseName;
+    }
+
+    function calcDist(p1, p2) {
+        return Math.sqrt(Math.pow(p1.x - p2.x, 2) + Math.pow(p1.y - p2.y, 2));
+    }
+
+    function analyzeHand(handLandmarks) {
+        if (!handLandmarks) return { count: 0, peace: false, stop: false };
+        
+        const wrist = handLandmarks[0];
+        const index  = calcDist(handLandmarks[8], wrist) > calcDist(handLandmarks[6], wrist);
+        const middle = calcDist(handLandmarks[12], wrist) > calcDist(handLandmarks[10], wrist);
+        const ring   = calcDist(handLandmarks[16], wrist) > calcDist(handLandmarks[14], wrist);
+        const pinky  = calcDist(handLandmarks[20], wrist) > calcDist(handLandmarks[18], wrist);
+
+        const thumb  = calcDist(handLandmarks[4], wrist) > calcDist(handLandmarks[2], wrist); 
+
+        const count = (index?1:0) + (middle?1:0) + (ring?1:0) + (pinky?1:0) + (thumb?1:0);
+
+        const isPeace = index && middle && !ring && !pinky;
+
+        const isStop = count >= 4;
+
+        return { count, peace: isPeace, stop: isStop };
+    }
+
+    function detectPose(results) {
+        const pose = results.poseLandmarks;
+        const face = results.faceLandmarks;
+        const leftHand = results.leftHandLandmarks;
+        const rightHand = results.rightHandLandmarks;
+
+        if (!pose) return { pose: 'neutral', debug: 'No Body' };
+
+        const leftShoulder = pose[11];
+        const rightShoulder = pose[12];
+        const shoulderWidth = calcDist(leftShoulder, rightShoulder);
+        
+        if (shoulderWidth < 0.02) return { pose: 'neutral', debug: 'Too Far' };
+
+        const nose = pose[0];
+        const leftWrist = pose[15];
+        const rightWrist = pose[16];
+        const leftEar = pose[7];
+        const rightEar = pose[8];
+
+        let debugInfo = "";
+        
+        const lHand = analyzeHand(leftHand);
+        const rHand = analyzeHand(rightHand);
+
+        if (lHand.peace && rHand.peace) {
+            return { pose: 'peace_two', debug: 'Double Peace' };
+        }
+
+        const distLeftEar = calcDist(leftWrist, leftEar);
+        const distRightEar = calcDist(rightWrist, rightEar);
+        if (distLeftEar < (shoulderWidth * 0.6) && distRightEar < (shoulderWidth * 0.6)) {
+            if (leftWrist.y < leftShoulder.y) return { pose: 'ears', debug: 'Sorry' };
+        }
+
+        const distLeftNose = calcDist(leftWrist, nose);
+        const distRightNose = calcDist(rightWrist, nose);
+        
+        if (distLeftNose < (shoulderWidth * 0.75) && distRightNose < (shoulderWidth * 0.75)) {
+                return { pose: 'scared', debug: 'Scared' };
+        }
+
+        if (leftWrist.y < nose.y && rightWrist.y < nose.y) {
+            if (leftWrist.visibility > 0.5 && rightWrist.visibility > 0.5) {
+                return { pose: 'hands_up', debug: 'Play Time' };
+            }
+        }
+
+        if (lHand.peace || rHand.peace) {
+            return { pose: 'peace_one', debug: 'Peace' };
+        }
+
+        const lNearCheek = distLeftNose < (shoulderWidth * 0.85);
+        const rNearCheek = distRightNose < (shoulderWidth * 0.85);
+
+        if (lNearCheek || rNearCheek) {
+            return { pose: 'cute', debug: 'Cutie' };
+        }
+
+        const lAway = distLeftNose > (shoulderWidth * 0.6);
+        const rAway = distRightNose > (shoulderWidth * 0.6);
+
+        if (lHand.stop && lAway) return { pose: 'stop', debug: 'Stop L' };
+        if (rHand.stop && rAway) return { pose: 'stop', debug: 'Stop R' };
+
+        if (face) {
+            const upperLip = face[13];
+            const lowerLip = face[14];
+            const mouthH = calcDist(upperLip, lowerLip);
+            
+            const leftCorner = face[61];
+            const rightCorner = face[291];
+            const mouthW = calcDist(leftCorner, rightCorner);
+            
+            const faceTop = face[10];
+            const chin = face[152];
+            const faceH = calcDist(faceTop, chin);
+
+            const openRatio = mouthH / faceH;
+            const wideRatio = mouthW / faceH;
+
+            debugInfo = `Open:${openRatio.toFixed(2)} Wide:${wideRatio.toFixed(2)}`;
+
+            if (openRatio > 0.20) {
+                    return { pose: 'mouth_open', debug: 'Yawn' };
+            }
+
+            if (openRatio > 0.12 && openRatio <= 0.25 && wideRatio < 0.45) {
+                return { pose: 'tongue', debug: 'Funny' };
+
+            }
+
+            if (wideRatio > 0.25 && openRatio < 0.2) {
+                return { pose: 'smile', debug: 'Smiling' };
+            }
+        }
+
+        return { pose: 'neutral', debug: debugInfo };
+    }
+
+    function onResults(results) {
+        loadingScreen.style.display = 'none';
+
+        canvasCtx.save();
+        canvasCtx.clearRect(0, 0, canvasElement.width, canvasElement.height);
+        canvasCtx.drawImage(results.image, 0, 0, canvasElement.width, canvasElement.height);
+        drawConnectors(canvasCtx, results.poseLandmarks, POSE_CONNECTIONS, {color: '#00ffff', lineWidth: 2});
+        drawConnectors(canvasCtx, results.leftHandLandmarks, HAND_CONNECTIONS, {color: '#39ff14', lineWidth: 2});
+        drawConnectors(canvasCtx, results.rightHandLandmarks, HAND_CONNECTIONS, {color: '#39ff14', lineWidth: 2});
+        canvasCtx.restore();
+
+        const result = detectPose(results);
+        const rawPose = result.pose;
+        debugText.innerText = "DATA:\n" + result.debug;
+
+        if (rawPose === lastDetectedPose) {
+            poseFrameCounter++;
+        } else {
+            poseFrameCounter = 0;
+            lastDetectedPose = rawPose;
+        }
+
+        if (poseFrameCounter > POSE_THRESHOLD) {
+            if (rawPose !== displayedPose) {
+                displayedPose = rawPose;
+                const displayLabel = LABELS[displayedPose] || displayedPose.toUpperCase();
+                statusText.innerText = displayLabel;
+                
+                if (displayedPose !== 'neutral') {
+                    statusText.style.color = '#39ff14';
+                    statusText.style.borderColor = '#39ff14';
+                    setAnimalImage(displayedPose);
+                } else {
+                    statusText.style.color = 'white';
+                    statusText.style.borderColor = 'white';
+                    setAnimalImage('neutral');
+                }
+            }
+        }
+    }
+    const holistic = new Holistic({locateFile: (file) => {
+        return `https://cdn.jsdelivr.net/npm/@mediapipe/holistic/${file}`;
+    }});
+    holistic.setOptions({
+        modelComplexity: 1,
+        smoothLandmarks: true,
+        enableSegmentation: false,
+        refineFaceLandmarks: true, 
+        minDetectionConfidence: 0.5,
+        minTrackingConfidence: 0.5
+    });
+
+    holistic.onResults(onResults);
+    async function startCamera() {
+        try {
+            const stream = await navigator.mediaDevices.getUserMedia({ 
+                video: { width: 640, height: 480 } 
+            });
+            videoElement.srcObject = stream;
+            videoElement.onloadedmetadata = () => {
+                videoElement.play();
+                processVideoFrame();
+            };
+        } catch (err) {
+            console.error("Camera Error:", err);
+            loadingScreen.innerHTML = `
+                <div class="loader" style="border-top-color: #ff3333; animation: none; border-color: #ff3333;"></div>
+                <h2 class="error-msg">ACCESS DENIED</h2>
+                <button onclick="location.reload()" style="padding: 10px; margin-top:10px; background: #333; color: white; border: 1px solid white;">RETRY</button>
+            `;
+        }
+    }
+
+    async function processVideoFrame() {
+        if (videoElement.paused || videoElement.ended) {
+            requestAnimationFrame(processVideoFrame);
+            return;
+        }
+        await holistic.send({image: videoElement});
+        requestAnimationFrame(processVideoFrame);
+    }
+    startCamera();
+
+</script>
+</body>
+</html>
